@@ -1,64 +1,72 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { encode } from 'k6/encoding';
-import { randomSeed } from 'k6';
 import { htmlReport } from "https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js";
-
 
 export let options = {
     stages: [
-        { duration: '30s', target: 1 },
-        { duration: '1m', target: 1 },
-        { duration: '30s', target: 0 },
+        { duration: '1m', target: 0 }, 
+        { duration: '1s', target: 10 },
+        { duration: '1m', target: 0 }, 
     ],
     thresholds: {
-        http_req_duration: ['p(95)<500'],
-    },
-    ext: {
-        influxdb: {
-            address: 'http://localhost:8086', 
-            token: 'HXYuLJsmyxNhZ2zlV_PlOj8sGTLJL4wllHLyXkbrKgUvON1W0g0F1SnTT41mysVoRNRS6RC0TC3HRcqfRt-fsA==',
-            org: 'test',
-            bucket: 'test',
-            tags: { env: 'local' },
-        },
+        http_req_duration: ['p(95)<500'], // Ensure 95% of requests complete in < 500ms
     },
 };
 
+// Simulate file upload and processing in batches
 export default function () {
-    let uniqueId = Date.now() + '-' + Math.random().toString(36).substring(2, 15);
+    // File content to upload
+    let fileContent = 'dummy file content';
 
-    // Create the file content dynamically
-    let fileContent = `dummy file content for file ID: ${uniqueId}`;
-    
-    // Use http.file() to create a file object
-    let fileData = http.file(fileContent, `dummyfile-${uniqueId}.txt`, 'text/plain');
+    // Batch of 100 file uploads
+    for (let i = 0; i < 100; i++) {
+        let uniqueId = Date.now() + '-' + Math.random().toString(36).substring(2, 15);
+        let fileData = http.file(fileContent, `dummyfile-${uniqueId}.txt`, 'text/plain');
 
-    // Send a multipart/form-data request to the CIP store API
-    let cipResponse = http.post('http://localhost:3001/api/cip/store', {
-        file: fileData,  // Pass the file data as form field
-    });
+        // Send file upload request
+        let response = http.post('http://localhost:3001/api/cip/store', {
+            file: fileData,
+        });
 
-    check(cipResponse, {
-        'File stored in CIP': (res) => res.status === 200,
-    });
+        // Check if the file was uploaded successfully
+        check(response, {
+            'File stored successfully': (res) => res.status === 200,
+        });
 
-    // Handle S3 upload and notification in separate requests
-    let s3Response = http.post('http://localhost:3001/api/s3/upload');
+        // Simulate a small delay between uploads in the batch
+        sleep(0.1); // Sleep for 100ms between file uploads
+    }
 
-    check(s3Response, {
-        'Files uploaded to S3': (res) => res.status === 200,
-    });
+    // Polling mechanism to ensure all files processed
+    let allProcessed = false;
+    let maxPollAttempts = 60; // Max polling attempts (polling every 10 seconds for 10 minutes)
 
-    let notifyResponse = http.post('http://localhost:3001/api/notify');
+    for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
+        let pollResponse = http.get('http://localhost:3001/api/cip/status');
+        
+        allProcessed = check(pollResponse, {
+            'All files processed': (res) => JSON.parse(res.body).allProcessed === true,
+        });
 
-    check(notifyResponse, {
-        'Notification sent': (res) => res.status === 200,
-    });
+        // If all files are processed, break out of the loop early
+        if (allProcessed) {
+            console.log(`All files processed after ${attempt + 1} attempts.`);
+            break;
+        }
 
-    sleep(1);
+        sleep(10); // Poll every 10 seconds
+    }
+
+    // Ensure polling did not exceed the max attempts
+    if (!allProcessed) {
+        console.error('Files were not processed within the 10-minute time window.');
+    }
+
+    // Wait for the next batch (controlled by stages)
+    sleep(600); // Sleep for 10 minutes
 }
 
+// Generate HTML report
 export function handleSummary(data) {
     return {
         "summary.html": htmlReport(data),
